@@ -125,3 +125,18 @@ def test_invoice_export_incident_can_retrieve_export_runbook():
     books = retrieve("Invoice export backlog failed outbound export retries")
     ids = [book["id"] for book in books]
     assert "RB-ERP-003" in ids
+
+
+def test_llm_response_parser_supports_ollama():
+    from app.agent import _llm_content
+
+    assert _llm_content({"response": '{"confidence": 0.8}'}, "ollama") == (
+        '{"confidence": 0.8}'
+    )
+
+
+def test_llm_response_parser_supports_chat_completions():
+    from app.agent import _llm_content
+
+    payload = {"choices": [{"message": {"content": '{"confidence": 0.8}'}}]}
+    assert _llm_content(payload, "openai_compatible") == '{"confidence": 0.8}'
