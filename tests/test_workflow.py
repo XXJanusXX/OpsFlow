@@ -1,23 +1,107 @@
 from fastapi.testclient import TestClient
-from app.main import app,WORKFLOWS
-client=TestClient(app)
-def setup_function(): WORKFLOWS.clear()
-def payload(): return {"incident_id":"INC-TEST-001","title":"ERP order processing job is failing","description":"Order import failed after a database connection timeout.","severity":"P2","system":"ERP"}
+
+from app.agent import ERP
+from app.main import app, WORKFLOWS
+
+client = TestClient(app)
+
+
+def setup_function():
+    WORKFLOWS.clear()
+    ERP["service"]["status"] = "running"
+
+
+def payload():
+    return {
+        "incident_id": "INC-TEST-001",
+        "title": "ERP order processing job is failing",
+        "description": "Order import failed after a database connection timeout.",
+        "severity": "P2",
+        "system": "ERP",
+    }
+
+
 def test_health():
- r=client.get("/health"); assert r.status_code==200 and r.json()["environment"]=="SYNTHETIC-DEMO"
-def test_investigation_has_evidence():
- r=client.post("/investigate",json=payload()); assert r.status_code==200
- b=r.json(); assert b["diagnosis"]["evidence"] and b["approval_required"] is True
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["environment"] == "SYNTHETIC-DEMO"
+
+
+def test_investigation_has_evidence_and_no_unsafe_action():
+    response = client.post("/investigate", json=payload())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["diagnosis"]["evidence"]
+    assert body["diagnosis"]["action_type"] == "no_action"
+    assert body["approval_required"] is False
+    assert body["status"] == "investigated"
+    assert [item.split(":")[0] for item in body["retrieved_runbooks"]] == ["RB-ERP-001"]
+
+
+def test_running_worker_cannot_be_restarted():
+    from app.agent import apply_action_policy
+
+    proposed = {
+        "action_type": "restart_job",
+        "recommended_action": "Restart the worker.",
+        "risk": "medium",
+        "rollback_plan": "Restore configuration.",
+    }
+    safe = apply_action_policy(proposed, {"service": {"status": "running"}})
+    assert safe["action_type"] == "no_action"
+    assert "worker is running" in safe["recommended_action"]
+
+
+def test_stopped_worker_can_have_restart_proposal():
+    from app.agent import apply_action_policy
+
+    proposed = {
+        "action_type": "restart_job",
+        "recommended_action": "Restart the worker.",
+        "risk": "medium",
+        "rollback_plan": "Restore configuration.",
+    }
+    safe = apply_action_policy(proposed, {"service": {"status": "stopped"}})
+    assert safe["action_type"] == "restart_job"
+
+
 def test_execution_requires_approval():
- inv=client.post("/investigate",json=payload()).json()
- assert client.post(f"/execute/{inv['investigation_id']}").status_code==403
+    from app.main import execute
+
+    result = client.post("/investigate", json=payload()).json()
+    assert result["approval_required"] is False
+    assert client.post(f"/execute/{result['investigation_id']}").status_code == 403
+
+
 def test_rejection_blocks_execution():
- inv=client.post("/investigate",json=payload()).json(); iid=inv["investigation_id"]
- client.post(f"/approvals/{iid}",json={"approved_by":"Reviewer","approved":False,"comment":"Rejected"})
- assert client.post(f"/execute/{iid}").status_code==403
+    ERP["service"]["status"] = "stopped"
+    result = client.post("/investigate", json=payload()).json()
+    investigation_id = result["investigation_id"]
+    assert result["approval_required"] is True
+    client.post(
+        f"/approvals/{investigation_id}",
+        json={"approved_by": "Reviewer", "approved": False, "comment": "Rejected"},
+    )
+    assert client.post(f"/execute/{investigation_id}").status_code == 403
+
+
 def test_approved_execution_is_simulated():
- inv=client.post("/investigate",json=payload()).json(); iid=inv["investigation_id"]
- client.post(f"/approvals/{iid}",json={"approved_by":"Reviewer","approved":True,"comment":"Demo approval"})
- r=client.post(f"/execute/{iid}"); assert r.status_code==200 and "Simulated" in r.json()["message"]
+    ERP["service"]["status"] = "stopped"
+    result = client.post("/investigate", json=payload()).json()
+    investigation_id = result["investigation_id"]
+    approval = client.post(
+        f"/approvals/{investigation_id}",
+        json={
+            "approved_by": "Reviewer",
+            "approved": True,
+            "comment": "Demo approval",
+        },
+    )
+    assert approval.status_code == 200
+    execution = client.post(f"/execute/{investigation_id}")
+    assert execution.status_code == 200
+    assert "Simulated" in execution.json()["message"]
+
+
 def test_unknown_workflow():
- assert client.post("/execute/unknown-id").status_code==404
+    assert client.post("/execute/unknown-id").status_code == 404
