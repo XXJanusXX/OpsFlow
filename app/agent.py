@@ -65,9 +65,22 @@ def _tokens(text):
 
 
 def retrieve(query):
+    """Retrieve runbooks with a lightweight domain gate before lexical ranking.
+
+    Queue/worker incidents should not pull in invoice-export procedures merely
+    because both documents mention pending or failed work. Invoice/export
+    procedures are eligible only when the incident itself mentions that domain.
+    """
     query_terms = _tokens(query)
+    invoice_export_terms = {"invoice", "export", "exports", "outbound"}
+    queue_terms = {"queue", "worker", "job", "jobs", "order", "import", "timeout", "retry"}
+    is_invoice_export = bool(query_terms & invoice_export_terms)
+    is_queue_incident = bool(query_terms & queue_terms)
+
     ranked = []
     for document in RUNBOOKS:
+        if document["id"] == "RB-ERP-003" and is_queue_incident and not is_invoice_export:
+            continue
         document_terms = _tokens(document["title"] + " " + document["text"])
         score = len(query_terms & document_terms)
         if score >= 2:
