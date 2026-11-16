@@ -2,7 +2,7 @@
 
 ## Automated test coverage
 
-The current automated suite contains 16 tests across `tests/test_workflow.py` and `tests/test_safety.py`. It covers:
+The current automated suite contains 17 tests across `tests/test_workflow.py` and `tests/test_safety.py`. It covers:
 
 - API health and incident-input validation.
 - Evidence collection and investigation response structure.
