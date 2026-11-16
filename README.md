@@ -2,11 +2,11 @@
 
 Evidence-grounded incident investigation with human-approved simulated actions.
 
-Workflow: incident intake → runbook retrieval → read-only ERP/ticket tools → configured LLM structured diagnosis (Ollama, OpenAI API or Gemini API) → human approval → allow-listed simulated action → SQLite audit.
+Workflow: incident intake → runbook retrieval → read-only ERP/ticket tools → configured LLM structured diagnosis (local Ollama or a hosted Chat Completions-compatible API) → human approval → allow-listed simulated action → SQLite audit.
 
 ## Architecture
 
-The diagram shows the current portfolio MVP architecture. ERP and ticket tools use synthetic data; corrective actions are simulated. Select one LLM provider through environment configuration: local Ollama, OpenAI API, or Gemini API. OpenAI and Gemini use the shared Chat Completions-compatible integration.
+The diagram shows the current portfolio MVP architecture. ERP and ticket tools use synthetic data; corrective actions are simulated. Select one LLM provider through environment configuration: local Ollama or a hosted Chat Completions-compatible API. The hosted adapter sends a Chat Completions request and expects a JSON-object response; use a provider/model that supports this request format.
 
 ```mermaid
 flowchart TD
@@ -25,11 +25,9 @@ flowchart TD
 
     COMPAT --> HOSTED_SELECT{Hosted Provider}
     HOSTED_SELECT -->|OpenAI| OPENAI[OpenAI API]
-    HOSTED_SELECT -->|Google| GEMINI[Gemini API]
 
     OLLAMA --> PARSE[Structured JSON Response]
     OPENAI --> PARSE
-    GEMINI --> PARSE
 
     PARSE --> VALIDATE[Pydantic Diagnosis Validation]
     AGENT -->|Inference/configuration failure| FALLBACK[Deterministic Fallback]
@@ -122,18 +120,66 @@ The health endpoint should return HTTP 200. The Ollama request should return JSO
 3. Check the effective settings without printing secrets:
 
    ```bash
-   python -c "from app.config import settings; print('Provider:', settings.LLM_PROVIDER); print('Ollama URL:', settings.OLLAMA_BASE_URL); print('Model:', settings.OLLAMA_MODEL); print('Timeout:', settings.LLM_TIMEOUT_SECONDS)"
+   python -c "from app.config import settings; print('Provider:', settings.llm_provider); print('Ollama URL:', settings.ollama_base_url); print('Ollama model:', settings.ollama_model); print('Hosted base URL configured:', bool(settings.compatible_base_url)); print('Hosted model configured:', bool(settings.compatible_model)); print('API key configured:', bool(settings.compatible_api_key)); print('Timeout:', settings.llm_timeout_seconds)"
    ```
 
 4. Check whether a local `.env` file exists. It is optional when application defaults are suitable; if you create one, start from `.env.example`. Do not paste API keys or other secrets into issue reports.
 5. Share the traceback and non-secret configuration values when requesting help. Do not treat a successful `/health` response as proof that `/investigate` is healthy.
 
-## Optional hosted inference
+## Hosted API-key inference (local backend)
 
-The same backend can use a hosted Chat Completions-compatible API. Set `LLM_PROVIDER=openai_compatible`, `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` in the backend environment. The adapter is intended to connect to OpenAI API or Gemini API using the provider's compatible endpoint, model name and API key. Confirm the selected model supports Chat Completions and JSON response format. Store API keys only in secret environment settings; never commit them. If configuration or inference fails, OpsFlow uses its deterministic fallback.
+Use this option when you want OpsFlow to call a hosted Chat Completions-compatible model instead of local Ollama. The backend currently calls `{LLM_BASE_URL}/chat/completions`, sends a Bearer API key when configured, requests `response_format: {"type":"json_object"}`, and reads `choices[0].message.content`. Select a provider endpoint and model that support this request format. For OpenAI, the base URL is `https://api.openai.com/v1`; use a model available to the API project that supports JSON mode. See the [Chat Completions API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) for the request format and [API authentication guidance](https://developers.openai.com/api/reference/overview) for secret handling.
 
-For Render, `localhost` refers to the Render container, not your laptop. A locally installed Ollama service is therefore available to a locally running OpsFlow backend, not automatically to the hosted Render backend.
+1. Copy `.env.example` to `.env` if you have not already.
+2. Change the provider and add the hosted endpoint, model identifier and API key to the local `.env` file:
 
+   ```dotenv
+   LLM_PROVIDER=openai_compatible
+   LLM_BASE_URL=https://api.openai.com/v1
+   LLM_MODEL=<model-supported-by-your-api-project>
+   LLM_API_KEY=<your-api-key>
+   LLM_TIMEOUT_SECONDS=60
+   ```
+
+3. Keep the key only in your local `.env`. Confirm `.env` is ignored by Git before proceeding; never paste a real key into source code, README, screenshots, terminal transcripts, issue reports or chat.
+4. Restart the FastAPI process so it reloads environment settings.
+5. Submit a synthetic incident and verify the dashboard indicates `LLM used: True`. Check the audit event for `llm_inference_succeeded` and provider `openai_compatible`. If inference fails, inspect the backend logs and `llm_diagnostic`; OpsFlow falls back to its deterministic diagnosis.
+
+A ChatGPT subscription and API usage are separate. API access, quotas and billing depend on the API account/project. Do not assume a key has available quota; a valid key can still receive quota or rate-limit errors.
+
+## Hosted deployment / production-app connection
+
+The hosted Streamlit frontend must call a reachable backend URL, and the API key must remain on the backend. For the current portfolio deployment pattern (Streamlit frontend + Render FastAPI backend):
+
+**Backend service (Render)**
+
+1. Open the FastAPI backend service's Environment settings.
+2. Add these environment variables. Use the actual backend model identifier selected for the API account:
+
+   ```text
+   LLM_PROVIDER=openai_compatible
+   LLM_BASE_URL=https://api.openai.com/v1
+   LLM_MODEL=<model-supported-by-your-api-project>
+   LLM_API_KEY=<set-as-a-secret-environment-variable>
+   LLM_TIMEOUT_SECONDS=60
+   ```
+
+3. Save the settings and redeploy/restart the backend service so the process receives them.
+4. Check the backend health URL: `https://<your-backend-host>/health`. Then submit a synthetic incident through the hosted frontend and verify the LLM success audit event.
+
+**Frontend service (Streamlit)**
+
+Set the Streamlit app's `OPSFLOW_API_URL` environment variable to the reachable backend base URL, for example:
+
+```text
+OPSFLOW_API_URL=https://<your-backend-host>
+```
+
+Redeploy/restart the frontend after changing its environment. Do not put `LLM_API_KEY` in Streamlit frontend settings, browser code, query parameters or frontend requests. The browser should call Streamlit; Streamlit calls FastAPI; only FastAPI calls the model provider.
+
+**Important deployment boundary:** This documents connecting the hosted OpsFlow demo to a hosted model API. It does not connect OpsFlow to a real production ERP or ticketing system. The ERP/ticket tools remain synthetic and corrective actions remain simulated. Before any real production integration, implement authentication and authorization, secret management, network controls, tenant isolation, durable state/audit, monitoring, approval identity verification, security review and operational testing. Do not send customer or company data to a third-party model unless the data owner and your organization's security/privacy policies explicitly permit it.
+
+For Render, `localhost` refers to the Render container, not your laptop. A locally installed Ollama service is available to a locally running OpsFlow backend, not automatically to the hosted Render backend.
 ## Evaluation
 
 See [docs/evaluation.md](docs/evaluation.md) for automated test coverage, safety rules, a reproducible scenario checklist and known evaluation gaps.
