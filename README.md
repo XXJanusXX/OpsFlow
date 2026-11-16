@@ -86,6 +86,48 @@ On Windows PowerShell, set the frontend API URL first with `$env:OPSFLOW_API_URL
 
 Live model inference is an optional local smoke test, not part of GitHub Actions CI. Record the machine/OS, model tag, test date, result and any latency you actually measure; do not report unmeasured accuracy or performance.
 
+### Troubleshooting local setup
+
+**Uvicorn reports `[Errno 48] Address already in use` (macOS/Linux)**
+
+This usually means another process is already listening on port 8000. Check which process owns the port:
+
+```bash
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+```
+
+If it is the existing OpsFlow backend, use that instance; do not start a second server. If you need to restart it, stop it with `Ctrl+C` in the terminal where it is running. If that terminal is unavailable, inspect the PID and command first:
+
+```bash
+ps -p <PID> -o pid,ppid,command
+```
+
+Only stop the process after confirming it is the OpsFlow Uvicorn process. Then start the backend again with `uvicorn app.main:app --reload`. Do not terminate an unidentified process.
+
+**Check the backend and Ollama independently**
+
+```bash
+curl -i http://127.0.0.1:8000/health
+curl http://localhost:11434/api/generate \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"llama3.2:3b","prompt":"Return a short JSON response.","stream":false,"format":"json"}'
+```
+
+The health endpoint should return HTTP 200. The Ollama request should return JSON with a `response` field. These checks prove that the services respond independently; they do not prove that the OpsFlow investigation workflow succeeds.
+
+**Streamlit reports HTTP 500 from `/investigate`**
+
+1. Reproduce the request while watching the terminal running Uvicorn.
+2. Copy the Python traceback printed at the time of the request. The final exception lines identify the backend failure; an HTTP 500 alone does not identify its cause.
+3. Check the effective settings without printing secrets:
+
+   ```bash
+   python -c "from app.config import settings; print('Provider:', settings.LLM_PROVIDER); print('Ollama URL:', settings.OLLAMA_BASE_URL); print('Model:', settings.OLLAMA_MODEL); print('Timeout:', settings.LLM_TIMEOUT_SECONDS)"
+   ```
+
+4. Check whether a local `.env` file exists. It is optional when application defaults are suitable; if you create one, start from `.env.example`. Do not paste API keys or other secrets into issue reports.
+5. Share the traceback and non-secret configuration values when requesting help. Do not treat a successful `/health` response as proof that `/investigate` is healthy.
+
 ## Optional hosted inference
 
 The same backend can use a hosted Chat Completions-compatible API. Set `LLM_PROVIDER=openai_compatible`, `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` in the backend environment. The adapter is intended to connect to OpenAI API or Gemini API using the provider's compatible endpoint, model name and API key. Confirm the selected model supports Chat Completions and JSON response format. Store API keys only in secret environment settings; never commit them. If configuration or inference fails, OpsFlow uses its deterministic fallback.
