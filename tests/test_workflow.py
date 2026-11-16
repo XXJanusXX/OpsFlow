@@ -38,6 +38,20 @@ def test_investigation_has_evidence_and_no_unsafe_action():
     assert [item.split(":")[0] for item in body["retrieved_runbooks"]] == ["RB-ERP-001"]
 
 
+def test_investigation_audit_records_llm_outcome():
+    response = client.post("/investigate", json=payload())
+    assert response.status_code == 200
+    iid = response.json()["investigation_id"]
+    audit_response = client.get(f"/audit/{iid}")
+    assert audit_response.status_code == 200
+    events = [event["event"] for event in audit_response.json()["events"]]
+    assert "evidence_collected" in events
+    assert (
+        "llm_inference_failed" in events
+        or "llm_inference_succeeded" in events
+    )
+
+
 def test_running_worker_cannot_be_restarted():
     from app.agent import apply_action_policy
 
@@ -66,8 +80,6 @@ def test_stopped_worker_can_have_restart_proposal():
 
 
 def test_execution_requires_approval():
-    from app.main import execute
-
     result = client.post("/investigate", json=payload()).json()
     assert result["approval_required"] is False
     assert client.post(f"/execute/{result['investigation_id']}").status_code == 403
@@ -91,11 +103,7 @@ def test_approved_execution_is_simulated():
     investigation_id = result["investigation_id"]
     approval = client.post(
         f"/approvals/{investigation_id}",
-        json={
-            "approved_by": "Reviewer",
-            "approved": True,
-            "comment": "Demo approval",
-        },
+        json={"approved_by": "Reviewer", "approved": True, "comment": "Demo approval"},
     )
     assert approval.status_code == 200
     execution = client.post(f"/execute/{investigation_id}")
@@ -107,13 +115,10 @@ def test_unknown_workflow():
     assert client.post("/execute/unknown-id").status_code == 404
 
 
-
 def test_queue_incident_excludes_invoice_export_runbook():
     from app.agent import retrieve
 
-    books = retrieve(
-        "ERP order processing job queue worker retry after database timeout"
-    )
+    books = retrieve("ERP order processing job queue worker retry after database timeout")
     ids = [book["id"] for book in books]
     assert "RB-ERP-001" in ids
     assert "RB-ERP-003" not in ids
@@ -130,9 +135,7 @@ def test_invoice_export_incident_can_retrieve_export_runbook():
 def test_llm_response_parser_supports_ollama():
     from app.agent import _llm_content
 
-    assert _llm_content({"response": '{"confidence": 0.8}'}, "ollama") == (
-        '{"confidence": 0.8}'
-    )
+    assert _llm_content({"response": '{"confidence": 0.8}'}, "ollama") == '{"confidence": 0.8}'
 
 
 def test_llm_response_parser_supports_chat_completions():
@@ -140,3 +143,23 @@ def test_llm_response_parser_supports_chat_completions():
 
     payload = {"choices": [{"message": {"content": '{"confidence": 0.8}'}}]}
     assert _llm_content(payload, "openai_compatible") == '{"confidence": 0.8}'
+
+
+def test_provider_error_details_are_sanitized():
+    from app.agent import _safe_provider_error
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "error": {
+                    "type": "insufficient_quota",
+                    "code": "billing_hard_limit_reached",
+                    "message": "Request rejected. token sk-1234567890abcdef is invalid",
+                }
+            }
+
+    details = _safe_provider_error(FakeResponse())
+    assert details["provider_error_type"] == "insufficient_quota"
+    assert details["provider_error_code"] == "billing_hard_limit_reached"
+    assert "sk-1234567890abcdef" not in details["provider_error_message"]
+    assert "[REDACTED]" in details["provider_error_message"]
