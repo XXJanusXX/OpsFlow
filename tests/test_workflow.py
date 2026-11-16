@@ -105,3 +105,23 @@ def test_approved_execution_is_simulated():
 
 def test_unknown_workflow():
     assert client.post("/execute/unknown-id").status_code == 404
+
+
+
+def test_queue_incident_excludes_invoice_export_runbook():
+    from app.agent import retrieve
+
+    books = retrieve(
+        "ERP order processing job queue worker retry after database timeout"
+    )
+    ids = [book["id"] for book in books]
+    assert "RB-ERP-001" in ids
+    assert "RB-ERP-003" not in ids
+
+
+def test_invoice_export_incident_can_retrieve_export_runbook():
+    from app.agent import retrieve
+
+    books = retrieve("Invoice export backlog failed outbound export retries")
+    ids = [book["id"] for book in books]
+    assert "RB-ERP-003" in ids
