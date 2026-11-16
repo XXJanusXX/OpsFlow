@@ -117,8 +117,9 @@ def fallback(erp, ticket):
         ],
         "recommended_action": (
             "Validate database connectivity and inspect active processing. "
-            "The worker is currently running, so a restart is not justified "
-            "by the available evidence."
+            "The worker is running, so a restart is not justified by the available evidence."
+            if erp["service"]["status"].lower() == "running"
+            else "The worker is not running; verify the failure evidence and obtain approval before a controlled restart."
         ),
         "action_type": "restart_job" if erp["service"]["status"].lower() != "running" else "no_action",
         "risk": "medium" if erp["service"]["status"].lower() != "running" else "low",
