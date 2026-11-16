@@ -170,6 +170,61 @@ def apply_action_policy(data, erp):
     return data
 
 
+def _llm_content(payload, provider):
+    """Extract generated text from Ollama or Chat Completions responses."""
+    if provider == "ollama":
+        return payload["response"]
+    return payload["choices"][0]["message"]["content"]
+
+
+def _generate_llm_response(prompt):
+    provider = settings.llm_provider
+    if provider == "openai_compatible":
+        if not settings.compatible_base_url or not settings.compatible_model:
+            raise ValueError("Hosted LLM URL and model must be configured")
+        headers = {"Content-Type": "application/json"}
+        if settings.compatible_api_key:
+            headers["Authorization"] = f"Bearer {settings.compatible_api_key}"
+        response = httpx.post(
+            f"{settings.compatible_base_url}/chat/completions",
+            headers=headers,
+            json={
+                "model": settings.compatible_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an evidence-grounded incident analyst. "
+                            "Return only valid JSON matching the requested schema. "
+                            "Never claim to execute actions."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=settings.llm_timeout_seconds,
+        )
+    elif provider == "ollama":
+        response = httpx.post(
+            f"{settings.ollama_base_url.rstrip('/')}/api/generate",
+            json={
+                "model": settings.ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.1},
+            },
+            timeout=settings.llm_timeout_seconds,
+        )
+    else:
+        raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
+
+    response.raise_for_status()
+    return json.loads(_llm_content(response.json(), provider))
+
+
 def investigate(incident):
     investigation_id = str(uuid.uuid4())
     runbooks = retrieve(incident["title"] + " " + incident["description"])
@@ -187,19 +242,7 @@ ERP_TOOL={json.dumps(erp)}
 TICKET_TOOL={json.dumps(ticket)}
 RUNBOOKS={json.dumps(runbooks)}"""
     try:
-        response = httpx.post(
-            f"{settings.ollama_base_url.rstrip('/')}/api/generate",
-            json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.1},
-            },
-            timeout=settings.ollama_timeout_seconds,
-        )
-        response.raise_for_status()
-        data = json.loads(response.json()["response"])
+        data = _generate_llm_response(prompt)
         data["llm_used"] = True
         diagnosis = Diagnosis.model_validate(apply_action_policy(data, erp))
     except (httpx.HTTPError, ValueError, KeyError, TypeError, ValidationError):
@@ -217,7 +260,6 @@ RUNBOOKS={json.dumps(runbooks)}"""
         "approval_required": approval_required,
         "status": "awaiting_approval" if approval_required else "investigated",
     }
-
 
 def execute_simulated(action, incident_id):
     if action not in {"restart_job", "clear_test_queue"}:
