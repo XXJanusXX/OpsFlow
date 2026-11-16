@@ -68,12 +68,7 @@ def _tokens(text):
 
 
 def retrieve(query):
-    """Retrieve runbooks with a lightweight domain gate before lexical ranking.
-
-    Queue/worker incidents should not pull in invoice-export procedures merely
-    because both documents mention pending or failed work. Invoice/export
-    procedures are eligible only when the incident itself mentions that domain.
-    """
+    """Retrieve runbooks with a lightweight domain gate before lexical ranking."""
     query_terms = _tokens(query)
     invoice_export_terms = {"invoice", "export", "exports", "outbound"}
     queue_terms = {"queue", "worker", "job", "jobs", "order", "import", "timeout", "retry"}
@@ -111,25 +106,10 @@ def fallback(erp, ticket):
         ),
         "confidence": 0.72,
         "evidence": [
-            {
-                "source": "ERP service tool",
-                "finding": f"Worker status: {erp['service']['status']}.",
-            },
-            {
-                "source": "ERP queue tool",
-                "finding": (
-                    f"{erp['job_queue']['failed_last_hour']} failures; "
-                    f"progressing={erp['job_queue']['progressing']}."
-                ),
-            },
-            {
-                "source": "ERP queue tool",
-                "finding": f"Latest error: {erp['job_queue']['last_error']}.",
-            },
-            {
-                "source": "Ticket tool",
-                "finding": f"{len(ticket['recent_updates'])} recent updates retrieved.",
-            },
+            {"source": "ERP service tool", "finding": f"Worker status: {erp['service']['status']}."},
+            {"source": "ERP queue tool", "finding": f"{erp['job_queue']['failed_last_hour']} failures; progressing={erp['job_queue']['progressing']}."},
+            {"source": "ERP queue tool", "finding": f"Latest error: {erp['job_queue']['last_error']}."},
+            {"source": "Ticket tool", "finding": f"{len(ticket['recent_updates'])} recent updates retrieved."},
         ],
         "recommended_action": (
             "Validate database connectivity and inspect active processing. "
@@ -159,9 +139,7 @@ def apply_action_policy(data, erp):
             "active processing before considering any restart."
         )
         data["risk"] = "low"
-        data["rollback_plan"] = (
-            "No change has been made; preserve queue records and continue monitoring."
-        )
+        data["rollback_plan"] = "No change has been made; preserve queue records and continue monitoring."
     elif action == "clear_test_queue":
         data["action_type"] = "no_action"
         data["recommended_action"] = (
@@ -180,43 +158,73 @@ def _llm_content(payload, provider):
     return payload["choices"][0]["message"]["content"]
 
 
+def _safe_provider_error(response):
+    """Extract a bounded provider error without exposing credentials or headers."""
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if isinstance(error, str):
+        message, code, error_type = error, None, None
+    elif isinstance(error, dict):
+        message = error.get("message")
+        code = error.get("code")
+        error_type = error.get("type")
+    else:
+        return {}
+    def clean(value):
+        if value is None:
+            return None
+        value = str(value)[:300]
+        value = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", value)
+        value = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", value)
+        return value
+    return {
+        "provider_error_type": clean(error_type),
+        "provider_error_code": clean(code),
+        "provider_error_message": clean(message),
+    }
+
+
 def _log_llm_failure(exc):
-    """Log useful failure metadata without logging credentials or request headers."""
+    """Log safe diagnostic metadata; never log request headers or credentials."""
     provider = settings.llm_provider
     model = settings.compatible_model if provider == "openai_compatible" else settings.ollama_model
+    diagnostic = {
+        "provider": provider,
+        "model": model,
+        "error_category": "llm_inference_failed",
+        "exception_type": type(exc).__name__,
+    }
 
     if isinstance(exc, httpx.HTTPStatusError):
+        diagnostic["http_status"] = exc.response.status_code
+        diagnostic.update(_safe_provider_error(exc.response))
         logger.warning(
-            "LLM request rejected: provider=%s model=%s http_status=%s",
-            provider, model, exc.response.status_code,
+            "LLM request rejected: provider=%s model=%s http_status=%s provider_error_type=%s provider_error_code=%s provider_error_message=%s",
+            provider, model, diagnostic["http_status"],
+            diagnostic.get("provider_error_type"),
+            diagnostic.get("provider_error_code"),
+            diagnostic.get("provider_error_message"),
         )
     elif isinstance(exc, httpx.TimeoutException):
-        logger.warning(
-            "LLM request timed out: provider=%s model=%s timeout_seconds=%s",
-            provider, model, settings.llm_timeout_seconds,
-        )
+        diagnostic["error_category"] = "timeout"
+        diagnostic["timeout_seconds"] = settings.llm_timeout_seconds
+        logger.warning("LLM request timed out: provider=%s model=%s timeout_seconds=%s", provider, model, settings.llm_timeout_seconds)
     elif isinstance(exc, httpx.RequestError):
-        logger.warning(
-            "LLM transport failure: provider=%s model=%s error_type=%s",
-            provider, model, type(exc).__name__,
-        )
+        diagnostic["error_category"] = "transport_error"
+        logger.warning("LLM transport failure: provider=%s model=%s error_type=%s", provider, model, type(exc).__name__)
     elif isinstance(exc, ValidationError):
-        logger.warning(
-            "LLM response failed diagnosis schema validation: provider=%s model=%s",
-            provider, model,
-        )
+        diagnostic["error_category"] = "schema_validation_error"
+        logger.warning("LLM response failed diagnosis schema validation: provider=%s model=%s", provider, model)
     elif isinstance(exc, (KeyError, TypeError, json.JSONDecodeError)):
-        logger.warning(
-            "LLM response parsing failed: provider=%s model=%s error_type=%s",
-            provider, model, type(exc).__name__,
-        )
+        diagnostic["error_category"] = "response_parse_error"
+        logger.warning("LLM response parsing failed: provider=%s model=%s error_type=%s", provider, model, type(exc).__name__)
     else:
-        # Do not include exception text: configuration errors can contain URLs
-        # or other deployment-specific values.
-        logger.warning(
-            "LLM inference unavailable: provider=%s model=%s error_type=%s",
-            provider, model, type(exc).__name__,
-        )
+        diagnostic["error_category"] = "configuration_or_response_error"
+        logger.warning("LLM inference unavailable: provider=%s model=%s error_type=%s", provider, model, type(exc).__name__)
+    return diagnostic
 
 
 def _generate_llm_response(prompt):
@@ -233,14 +241,7 @@ def _generate_llm_response(prompt):
             json={
                 "model": settings.compatible_model,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an evidence-grounded incident analyst. "
-                            "Return only valid JSON matching the requested schema. "
-                            "Never claim to execute actions."
-                        ),
-                    },
+                    {"role": "system", "content": "You are an evidence-grounded incident analyst. Return only valid JSON matching the requested schema. Never claim to execute actions."},
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.1,
@@ -251,13 +252,7 @@ def _generate_llm_response(prompt):
     elif provider == "ollama":
         response = httpx.post(
             f"{settings.ollama_base_url.rstrip('/')}/api/generate",
-            json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.1},
-            },
+            json={"model": settings.ollama_model, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0.1}},
             timeout=settings.llm_timeout_seconds,
         )
     else:
@@ -283,12 +278,13 @@ INCIDENT={json.dumps(incident)}
 ERP_TOOL={json.dumps(erp)}
 TICKET_TOOL={json.dumps(ticket)}
 RUNBOOKS={json.dumps(runbooks)}"""
+    llm_diagnostic = None
     try:
         data = _generate_llm_response(prompt)
         data["llm_used"] = True
         diagnosis = Diagnosis.model_validate(apply_action_policy(data, erp))
     except (httpx.HTTPError, ValueError, KeyError, TypeError, ValidationError) as exc:
-        _log_llm_failure(exc)
+        llm_diagnostic = _log_llm_failure(exc)
         diagnosis = Diagnosis.model_validate(fallback(erp, ticket))
 
     approval_required = diagnosis.action_type != "no_action"
@@ -296,9 +292,8 @@ RUNBOOKS={json.dumps(runbooks)}"""
         "investigation_id": investigation_id,
         "incident_id": incident["incident_id"],
         "diagnosis": diagnosis,
-        "retrieved_runbooks": [
-            f"{book['id']}: {book['title']}" for book in runbooks
-        ],
+        "llm_diagnostic": llm_diagnostic,
+        "retrieved_runbooks": [f"{book['id']}: {book['title']}" for book in runbooks],
         "tool_results": {"erp_status": erp, "ticket_history": ticket},
         "approval_required": approval_required,
         "status": "awaiting_approval" if approval_required else "investigated",
