@@ -120,9 +120,13 @@ def fallback(erp, ticket):
             "The worker is currently running, so a restart is not justified "
             "by the available evidence."
         ),
-        "action_type": "no_action",
-        "risk": "low",
-        "rollback_plan": "No change has been made; preserve the queue and continue monitoring.",
+        "action_type": "restart_job" if erp["service"]["status"].lower() != "running" else "no_action",
+        "risk": "medium" if erp["service"]["status"].lower() != "running" else "low",
+        "rollback_plan": (
+            "Restore previous worker configuration, resume monitoring and verify queue progress."
+            if erp["service"]["status"].lower() != "running"
+            else "No change has been made; preserve the queue and continue monitoring."
+        ),
         "llm_used": False,
     }
 
