@@ -4,6 +4,38 @@ Evidence-grounded incident investigation with human-approved simulated actions.
 
 Workflow: incident intake → runbook retrieval → read-only ERP/ticket tools → Ollama structured diagnosis → human approval → allow-listed simulated action → SQLite audit.
 
+## Architecture
+
+The diagram shows the current portfolio MVP architecture. ERP and ticket tools use synthetic data; corrective actions are simulated.
+
+```mermaid
+flowchart TD
+    U[User] --> UI[Streamlit Dashboard]
+    UI --> API[FastAPI Application]
+    API --> AGENT[Investigation Agent]
+
+    AGENT --> RET[Lexical Runbook Retrieval]
+    AGENT --> ERP[Read-only Synthetic ERP Tool]
+    AGENT --> TICKET[Read-only Synthetic Ticket Tool]
+
+    AGENT --> LLM{LLM Provider}
+    LLM -->|Local inference| OLLAMA[Ollama]
+    LLM -->|Optional hosted inference| HOSTED[Chat Completions-compatible API]
+    OLLAMA --> DIAG[Structured Diagnosis]
+    HOSTED --> DIAG
+    AGENT -->|Fallback if inference fails| DIAG
+
+    DIAG --> POLICY[Action Policy and Approval Gate]
+    POLICY -->|No action required| RESULT[Investigation Result]
+    POLICY -->|Action proposed| HUMAN[Human Approval]
+    HUMAN -->|Approved| SIM[Allow-listed Simulated Action]
+    HUMAN -->|Rejected| RESULT
+    SIM --> RESULT
+
+    API --> AUDIT[(SQLite Audit Log)]
+    RESULT --> UI
+```
+
 ## Safety boundary
 Synthetic portfolio data only. No real ERP, ticketing or production connection. The LLM cannot execute actions; API code enforces approval and an action allow-list.
 
@@ -11,7 +43,7 @@ Synthetic portfolio data only. No real ERP, ticketing or production connection. 
 Python 3.11+. Inference supports local Ollama or a hosted Chat Completions-compatible API.
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\\.venv\\Scripts\\Activate.ps1
 pip install -e ".[dev]"
 Copy-Item .env.example .env
 ollama pull llama3.2:3b
