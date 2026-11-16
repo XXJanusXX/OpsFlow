@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from copy import deepcopy
@@ -8,6 +9,8 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.models import Diagnosis
+
+logger = logging.getLogger(__name__)
 
 # Synthetic data only; tools are read-only except the explicit simulator.
 RUNBOOKS = [
@@ -177,6 +180,45 @@ def _llm_content(payload, provider):
     return payload["choices"][0]["message"]["content"]
 
 
+def _log_llm_failure(exc):
+    """Log useful failure metadata without logging credentials or request headers."""
+    provider = settings.llm_provider
+    model = settings.compatible_model if provider == "openai_compatible" else settings.ollama_model
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        logger.warning(
+            "LLM request rejected: provider=%s model=%s http_status=%s",
+            provider, model, exc.response.status_code,
+        )
+    elif isinstance(exc, httpx.TimeoutException):
+        logger.warning(
+            "LLM request timed out: provider=%s model=%s timeout_seconds=%s",
+            provider, model, settings.llm_timeout_seconds,
+        )
+    elif isinstance(exc, httpx.RequestError):
+        logger.warning(
+            "LLM transport failure: provider=%s model=%s error_type=%s",
+            provider, model, type(exc).__name__,
+        )
+    elif isinstance(exc, ValidationError):
+        logger.warning(
+            "LLM response failed diagnosis schema validation: provider=%s model=%s",
+            provider, model,
+        )
+    elif isinstance(exc, (KeyError, TypeError, json.JSONDecodeError)):
+        logger.warning(
+            "LLM response parsing failed: provider=%s model=%s error_type=%s",
+            provider, model, type(exc).__name__,
+        )
+    else:
+        # Do not include exception text: configuration errors can contain URLs
+        # or other deployment-specific values.
+        logger.warning(
+            "LLM inference unavailable: provider=%s model=%s error_type=%s",
+            provider, model, type(exc).__name__,
+        )
+
+
 def _generate_llm_response(prompt):
     provider = settings.llm_provider
     if provider == "openai_compatible":
@@ -245,7 +287,8 @@ RUNBOOKS={json.dumps(runbooks)}"""
         data = _generate_llm_response(prompt)
         data["llm_used"] = True
         diagnosis = Diagnosis.model_validate(apply_action_policy(data, erp))
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, ValidationError):
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, ValidationError) as exc:
+        _log_llm_failure(exc)
         diagnosis = Diagnosis.model_validate(fallback(erp, ticket))
 
     approval_required = diagnosis.action_type != "no_action"
@@ -260,6 +303,7 @@ RUNBOOKS={json.dumps(runbooks)}"""
         "approval_required": approval_required,
         "status": "awaiting_approval" if approval_required else "investigated",
     }
+
 
 def execute_simulated(action, incident_id):
     if action not in {"restart_job", "clear_test_queue"}:
